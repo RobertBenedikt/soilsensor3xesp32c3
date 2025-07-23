@@ -1,56 +1,164 @@
-esp32:
-  board: esp32-c3-devkitm-1
-  framework:
-    type: esp-idf
+# Definice status LED (použijte vestavěnou nebo připojenou LED)
+light:
+  - platform: status_led
+    id: status_led_1
+    name: "Status LED"
+    pin: GPIO8  # Upravte podle vašeho HW (např. vestavěná LED na GPIO2)
+    restore_mode: ALWAYS_OFF  # Vypnout LED po startu
+    
+# Řešení problému s okamžitým spánkem
+globals:
+  - id: first_boot
+    type: bool
+    restore_value: true
+    initial_value: "true"
+  - id: sleep_requested
+    type: bool
+    initial_value: "false"
+# interval mezi měřeními
+  - id: measure_interval
+    type: int
+    initial_value: '120'
+    restore_value: true
 
-# These substitutions allow the end user to override certain values
-substitutions:
-  name: "soilsensor3xesp32c3"
-  friendly_name: "SoilSensor3xESP32C3"
+binary_sensor:
+  - platform: status
+    name: "Status"
+    on_press:  # Při připojení
+      then:
+        - light.turn_on: status_led_1
+        - delay: 200ms
+        - light.turn_off: status_led_1
+    on_release:  # Při ztrátě spojení
+      then:
+        - light.turn_off: status_led_1
 
-esphome:
-  name: "${name}"
-  # Friendly names are used where appropriate in Home Assistant
-  friendly_name: "${friendly_name}"
-  # Automatically add the mac address to the name
-  # so you can use a single firmware for all devices
-  name_add_mac_suffix: true
+# Napájecí piny pro senzory
+output:
+  - platform: gpio
+    pin: GPIO4
+    id: power_sensor1
+  - platform: gpio
+    pin: GPIO5
+    id: power_sensor2
+  - platform: gpio
+    pin: GPIO6
+    id: power_sensor3
 
-  # This will allow for (future) project identification,
-  # configuration and updates.
-  project:
-    name: esphome.soil-sensor-3x-esp32
-    version: "1.0"
+sensor:
+  - platform: adc
+    pin: GPIO0
+    name: "Soil Moisture 1"
+    id: soil1
+    attenuation: 12db
+    update_interval: never
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 1.0 -> 100.0
+      - sliding_window_moving_average:
+          window_size: 3
+    on_value:
+      then:
+        - output.turn_off: power_sensor1
+        - globals.set:
+            id: sleep_requested
+            value: "true"
 
-# To be able to get logs from the device via serial and api.
-logger:
+  - platform: adc
+    pin: GPIO1
+    name: "Soil Moisture 2"
+    id: soil2
+    attenuation: 12db
+    update_interval: never
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 1.0 -> 100.0
+      - sliding_window_moving_average:
+          window_size: 3
+    on_value:
+      then:
+        - output.turn_off: power_sensor2
+        - globals.set:
+            id: sleep_requested
+            value: "true"
 
-# API is a requirement of the dashboard import.
-api:
+  - platform: adc
+    pin: GPIO3
+    name: "Soil Moisture 3"
+    id: soil3
+    attenuation: 12db
+    update_interval: never
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 1.0 -> 100.0
+      - sliding_window_moving_average:
+          window_size: 3
+    on_value:
+      then:
+        - output.turn_off: power_sensor3
+        - globals.set:
+            id: sleep_requested
+            value: "true"
 
-# OTA is required for Over-the-Air updating
-ota:
-  platform: esphome
+deep_sleep:
+  id: deep_sleep_mode
+  run_duration: 120s  # Maximální doba běhu před usnutím
 
-# This should point to the public location of this yaml file.
-dashboard_import:
-  package_import_url: github://robertbenedikt/soil-sensor-3x-esp32/soil-sensor-3x-esp32.yaml@main
-  import_full_config: false # or true
+interval:
+  - interval: 100ms
+    then:
+      - output.turn_on: power_sensor1
+      - output.turn_on: power_sensor2
+      - output.turn_on: power_sensor3
+      - delay: 200ms
 
-wifi:
-  # Set up a wifi access point
-  ap:
-    password: "12345678"
+  - interval: 500ms
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - logger.log: "WiFi is connected!"
+            - component.update: soil1
+            - component.update: soil2
+            - component.update: soil3
+            - delay: 200ms
+          else:
+            - logger.log: "zapínám WiFi"
+            - wifi.enable:
 
-# In combination with the `ap` this allows the user
-# to provision wifi credentials to the device.
-captive_portal:
+  - interval: 2s  # Po dokončení měření
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(sleep_requested) && !id(first_boot);
+          then:
+            - logger.log: "Příprava na deep sleep"
+            - output.turn_off: power_sensor1
+            - output.turn_off: power_sensor2
+            - output.turn_off: power_sensor3
+            - light.turn_off: status_led_1
+            - delay: 100ms
+            - deep_sleep.enter:
+                id: deep_sleep_mode
+                sleep_duration: !lambda |-
+                  int interval = id(measure_interval);
+                  return interval * 1000;
 
-# Sets up Bluetooth LE (Only on ESP32) to allow the user
-# to provision wifi credentials to the device.
-esp32_improv:
-  authorizer: none
-
-# Sets up the improv via serial client for Wi-Fi provisioning
-#improv_serial:
-#  next_url: https://example.com/project-template/manual?ip={{ip_address}}&name={{device_name}}&version={{esphome_version}}
+  - interval: 3min
+    then:
+      - if:
+          condition:
+            lambda: "return id(first_boot);"
+          then:
+            - logger.log: "Dokončuji první boot"
+            - globals.set:
+                id: first_boot
+                value: "false"
+            - globals.set:
+                id: sleep_requested
+                value: "true"
