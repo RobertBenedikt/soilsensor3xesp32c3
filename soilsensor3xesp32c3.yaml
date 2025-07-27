@@ -1,25 +1,67 @@
+esphome:
+  on_boot: 
+    then:
+      - logger.log: "Power ON sensors..."
+      - output.turn_on: power_sensor1
+      - output.turn_on: power_sensor2
+      - output.turn_on: power_sensor3
+      - delay: 1s
+  on_shutdown: 
+    then:
+      - logger.log: "Power OFF sensors..."
+      - output.turn_off: power_sensor1
+      - output.turn_off: power_sensor2
+      - output.turn_off: power_sensor3
+      - logger.log: "Příprava na deep sleep"
+      - light.turn_off: status_led_1
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: DEBUG  # Dočasně pro diagnostiku
+  baud_rate: 0  # Vypne UART logging pro úsporu energie
+
+ota:
+  - platform: esphome
+
+wifi:
+  fast_connect: True  # Může způsobovat problémy s deep sleep
+  #power_save_mode: none  # Důležité pro stabilitu
+  #enable_on_boot: true  # Manuální ovládání WiFi
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+
+captive_portal:
+
 # Definice status LED (použijte vestavěnou nebo připojenou LED)
 light:
   - platform: status_led
     id: status_led_1
     name: "Status LED"
-    pin: GPIO8  # Upravte podle vašeho HW (např. vestavěná LED na GPIO2)
     restore_mode: ALWAYS_OFF  # Vypnout LED po startu
-    
-# Řešení problému s okamžitým spánkem
-globals:
-  - id: first_boot
-    type: bool
-    restore_value: true
-    initial_value: "true"
-  - id: sleep_requested
-    type: bool
-    initial_value: "false"
-# interval mezi měřeními
-  - id: measure_interval
-    type: int
-    initial_value: '120'
-    restore_value: true
+    disabled_by_default: True
+    internal: true
+    pin:
+      number: GPIO8
+      inverted: true
+
+deep_sleep:
+  id: deep_sleep_mode
+  run_duration:
+    default: 2s
+    gpio_wakeup_reason: 5min
+  sleep_duration: 30min
+  wakeup_pin:
+    number: GPIO2
+    inverted: True
+    mode: INPUT_PULLUP
+  wakeup_pin_mode: IGNORE
+  
 
 binary_sensor:
   - platform: status
@@ -36,7 +78,7 @@ binary_sensor:
 # Napájecí piny pro senzory
 output:
   - platform: gpio
-    pin: GPIO4
+    pin: GPIO7
     id: power_sensor1
   - platform: gpio
     pin: GPIO5
@@ -48,117 +90,137 @@ output:
 sensor:
   - platform: adc
     pin: GPIO0
-    name: "Soil Moisture 1"
+    name: "Senzor vlhkosti 1"
     id: soil1
     attenuation: 12db
     update_interval: never
+    icon: mdi:flower
+    unit_of_measurement: '%'
+    accuracy_decimals: 1
     filters:
-      - calibrate_linear:
-          - 0.0 -> 0.0
-          - 1.0 -> 100.0
+      - lambda: |-
+          if (x > 2.35) { 				// if over 2.4 volts, we are dry
+            return 0;
+          } else if (x < 0.94) { 			// if under 0.264 volts, we are fully saturated
+            return 100;
+          } else {
+            return (2.35-x) / (2.35-0.94) * 100.0; 	// use a linear fit for any values in between
+          }
       - sliding_window_moving_average:
           window_size: 3
-    on_value:
-      then:
-        - output.turn_off: power_sensor1
-        - globals.set:
-            id: sleep_requested
-            value: "true"
 
   - platform: adc
     pin: GPIO1
-    name: "Soil Moisture 2"
+    name: "Senzor vlhkosti 2"
     id: soil2
     attenuation: 12db
     update_interval: never
+    icon: mdi:flower
+    unit_of_measurement: '%'
+    accuracy_decimals: 1
     filters:
-      - calibrate_linear:
-          - 0.0 -> 0.0
-          - 1.0 -> 100.0
+      - lambda: |-
+          if (x > 2.35) { 				// if over 2.4 volts, we are dry
+            return 0;
+          } else if (x < 0.94) { 			// if under 0.264 volts, we are fully saturated
+            return 100;
+          } else {
+            return (2.35-x) / (2.35-0.94) * 100.0; 	// use a linear fit for any values in between
+          }
       - sliding_window_moving_average:
           window_size: 3
-    on_value:
-      then:
-        - output.turn_off: power_sensor2
-        - globals.set:
-            id: sleep_requested
-            value: "true"
 
   - platform: adc
     pin: GPIO3
-    name: "Soil Moisture 3"
+    name: "Senzor vlhkosti 3"
     id: soil3
     attenuation: 12db
     update_interval: never
+    icon: mdi:flower
+    unit_of_measurement: '%'
+    accuracy_decimals: 1
     filters:
-      - calibrate_linear:
-          - 0.0 -> 0.0
-          - 1.0 -> 100.0
+      - multiply: 1.015
+      - lambda: |-
+          if (x > 2.35) { 				// if over 2.4 volts, we are dry
+            return 0;
+          } else if (x < 0.94) { 			// if under 0.264 volts, we are fully saturated
+            return 100;
+          } else {
+            return (2.35-x) / (2.35-0.94) * 100.0; 	// use a linear fit for any values in between
+          }
       - sliding_window_moving_average:
           window_size: 3
-    on_value:
-      then:
-        - output.turn_off: power_sensor3
-        - globals.set:
-            id: sleep_requested
-            value: "true"
 
-deep_sleep:
-  id: deep_sleep_mode
-  run_duration: 120s  # Maximální doba běhu před usnutím
+  # Monitorování baterie
+  - platform: adc
+    pin: GPIO4
+    name: "Napětí baterie"
+    id: battery_voltage
+    attenuation: 12db  # Pro měření až 3.3V
+    update_interval: never
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    filters:
+      - multiply: 2.017  # Kompenzace děliče 1:1 (R1=R2=100kΩ)
+      - sliding_window_moving_average:
+          window_size: 5
+    # on_value:
+    #   then:
+    #     - if:
+    #         condition:
+    #           lambda: "return x < 3.3;"  # Varování při nízkém napětí
+    #         then:
+    #           - light.turn_on: status_led_1
+    #           - delay: 100ms
+    #           - light.turn_off: status_led_1
+    #           - delay: 100ms
+    #           - light.turn_on: status_led_1
+    #           - delay: 100ms
+    #           - light.turn_off: status_led_1
+    # Přepočet na procenta (pro Li-ion 3.0V-4.2V)
+  - platform: template
+    name: "Stav baterie"
+    id: battery_fuel
+    unit_of_measurement: "%"
+    icon: mdi:battery
+    entity_category: diagnostic
+    lambda: |-
+      float voltage = id(battery_voltage).state;
+      if (voltage > 4.15) return 100;
+      if (voltage < 3.3) return 0;
+      return (voltage - 3.3) / (4.15 - 3.3) * 100.0;
+    update_interval: never
+
+  - platform: wifi_signal
+    name: "Síla WiFi signálu"
+    id: wifi_level
+    update_interval: never
+    disabled_by_default: true
+    entity_category: diagnostic
 
 interval:
-  - interval: 100ms
-    then:
-      - output.turn_on: power_sensor1
-      - output.turn_on: power_sensor2
-      - output.turn_on: power_sensor3
-      - delay: 200ms
-
-  - interval: 500ms
+  - interval: 1s
     then:
       - if:
           condition:
             wifi.connected:
           then:
-            - logger.log: "WiFi is connected!"
             - component.update: soil1
             - component.update: soil2
             - component.update: soil3
-            - delay: 200ms
+            - component.update: battery_voltage
+            - component.update: battery_fuel
+            - component.update: wifi_level
           else:
             - logger.log: "zapínám WiFi"
             - wifi.enable:
+            - delay: 3s
+            - component.update: soil1
+            - component.update: soil2
+            - component.update: soil3
+          
 
-  - interval: 2s  # Po dokončení měření
-    then:
-      - if:
-          condition:
-            lambda: |-
-              return id(sleep_requested) && !id(first_boot);
-          then:
-            - logger.log: "Příprava na deep sleep"
-            - output.turn_off: power_sensor1
-            - output.turn_off: power_sensor2
-            - output.turn_off: power_sensor3
-            - light.turn_off: status_led_1
-            - delay: 100ms
-            - deep_sleep.enter:
-                id: deep_sleep_mode
-                sleep_duration: !lambda |-
-                  int interval = id(measure_interval);
-                  return interval * 1000;
 
-  - interval: 3min
-    then:
-      - if:
-          condition:
-            lambda: "return id(first_boot);"
-          then:
-            - logger.log: "Dokončuji první boot"
-            - globals.set:
-                id: first_boot
-                value: "false"
-            - globals.set:
-                id: sleep_requested
-                value: "true"
+
+
